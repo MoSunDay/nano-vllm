@@ -33,6 +33,10 @@ outputs = llm.generate(prompts, SamplingParams(temperature=0.6, max_tokens=256))
 
 - [knowledge/](knowledge/index.md) —— 大模型 & 推理框架学习路线（从零到一，总分总结构）
 
+## 问答串讲记录
+
+- [changelog/](changelog/index.md) —— 概念串讲问答记录（一问一答，逐步深入）
+
 ## 相关逻辑
 
 - [agents/engine](../agents/engine/index.md)
