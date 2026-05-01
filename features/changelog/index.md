@@ -14,6 +14,15 @@
 | 4 | 100层=1层（全是线性） | SiLU | ✅ 已完成 |
 | 5 | 只能输出概率，选不出字 | Sampler | ✅ 已完成 |
 
+### 引擎层：让推理跑得起来、跑得快
+
+| # | 问题 | 解决组件 | 状态 |
+|---|------|---------|------|
+| E1 | 所有请求同时涌入 → GPU 崩溃 | Scheduler（调度器） | ✅ 已完成 |
+| E2 | KV cache 浪费 + 重复计算 | BlockManager（块管理器） | ✅ 已完成 |
+| E3 | 不知道谁跑完了、谁还在等 | Sequence（序列） | ✅ 已完成 |
+| E4 | 调度器说了"跑"，但没人执行 | ModelRunner（模型执行器） | ✅ 已完成 |
+
 ---
 
 ## Q1：数字为什么会爆？RMSNorm 拉回来会不会失真？
@@ -282,5 +291,63 @@ x = -5: SiLU = -0.035, 梯度 ≈ 0.007  （很小但仍然不是 0）
 - Sampler = 概率 → 具体选择的桥梁，没有它模型只给"菜单"不"上菜"
 - 不是温度高了才好，而是对齐训练让概率分布变平了，高温度是补回来
 - Temperature 是产品设计和技术的双重选择
+
+---
+
+## E1-E4：引擎层——怎么让推理跑得起来、跑得快
+
+### 学生问
+
+（无，老师直接展开讲解）
+
+### 老师答
+
+**E1 Scheduler（调度器）——控制流量，防止 GPU 崩溃：**
+
+没有调度器时，100 个请求同时涌入 GPU，每个都要占 KV cache，显存不够就 OOM 崩溃。调度器控制"餐厅"流量：显存充足放更多请求，显存紧张让新请求排队。
+
+调度策略：每轮要么全做 prefill（处理新请求的 prompt，计算量大），要么全做 decode（已运行的请求各生成 1 个 token，显存带宽瓶颈）。两者走不同的 GPU 代码路径，不混在一起。
+
+显存不够时的抢占机制：把最早开始 decode 的请求踢回等待队列，释放 KV cache 给更需要的请求，被踢的请求下次重新 prefill。
+
+**E2 BlockManager（块管理器）——KV cache 按需分配 + 前缀复用：**
+
+没有块管理器时两个问题：
+1. 空间浪费：预分配 2048 token 的空间但只用了 100 个，剩下的空着但别的请求用不了
+2. 无法复用：两个请求开头一样，各自的 KV cache 分别存了一份一模一样的内容
+
+解法：KV cache 切成固定大小的块（每块 256 token），按需分配。通过链式哈希（每个块的哈希依赖内容 + 前一个块的哈希）实现 prefix caching——相同前缀的块跨请求共享，第二个请求直接引用第一个请求已经算好的块，不用重新算。
+
+**E3 Sequence（序列）——一个请求从生到死的完整档案：**
+
+记录每个请求的：状态（WAITING/RUNNING/FINISHED）、进度（生成了多少 token）、预算（max_tokens）、结束条件（是否遇到 EOS）、位置信息（block_table）。调度器每轮扫描所有 Sequence 的状态来决定下一步做什么。
+
+**E4 ModelRunner（模型执行器）——把调度决策翻译成 GPU 指令：**
+
+三步工作：① 把多个请求的 token 拼成 tensor（prefill 用变长拼接，decode 每请求 1 token）→ ② 调用模型前向传播 → ③ 采样并拆分结果到各自的 Sequence。
+
+性能优化职责：
+- CUDA Graph：decode 每步做的事一样，提前"录制"操作序列，运行时直接"回放"，跳过 CPU 调度开销。按不同 batch size（1, 2, 4, ..., 512）预录制多个 graph
+- torch.compile：自动融合小操作（如 RMSNorm 的五步合成一个 kernel），减少显存读写次数
+
+**完整一次推理流程：**
+
+```
+用户发送请求
+→ Scheduler 排队，创建 Sequence（WAITING）
+→ BlockManager 分配 block
+→ Scheduler 决策：本轮 prefill
+→ ModelRunner：拼 tensor → Embedding → 36 层 Transformer → LM Head → Sampler 选出 token
+→ Scheduler 后处理：Sequence 追加 token（RUNNING），BlockManager 更新 hash
+→ 循环 decode 直到 EOS 或 max_tokens
+→ Sequence FINISHED → BlockManager 回收 block → 返回结果
+```
+
+### 关键收获
+
+- 九个组件（模型层 5 + 引擎层 4），每一个去掉都会导致功能缺失、性能崩溃或根本跑不起来
+- 调度器平衡 prefill 和 decode 两类任务，显存不足时抢占早期请求
+- BlockManager 解决 KV cache 的空间浪费（按需分配）和重复计算（prefix caching）
+- ModelRunner 是调度器和 GPU 之间的"翻译官"，还负责 CUDA Graph 和 torch.compile 优化
 
 ---
