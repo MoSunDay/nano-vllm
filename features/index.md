@@ -29,6 +29,10 @@ outputs = llm.generate(prompts, SamplingParams(temperature=0.6, max_tokens=256))
 - CUDA graph 仅用于 decode 且 batch ≤ 512
 - 需要 GPU（CUDA）
 
+## 学习路线
+
+- [knowledge/](knowledge/index.md) —— 大模型 & 推理框架学习路线（从零到一，总分总结构）
+
 ## 相关逻辑
 
 - [agents/engine](../agents/engine/index.md)
